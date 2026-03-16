@@ -1,4 +1,6 @@
 """
+Minimal Anthropic-to-Bedrock proxy.
+
 Accepts Anthropic Messages API requests from Claude Code,
 strips unsupported params, calls models on Bedrock via boto3,
 returns Anthropic-format responses.
@@ -33,10 +35,15 @@ MODEL_MAP = {
     "deepseek-v3.2": "deepseek.v3.2",
     # Qwen3 (32K context)
     "qwen3-32b":         "qwen.qwen3-32b-v1:0",
-    "qwen3-coder":       "qwen.qwen3-coder-30b-a3b-v1:0",
-    "qwen3-coder-next":  "qwen.qwen3-coder-next",
-    "qwen3-80b":         "qwen.qwen3-next-80b-a3b",
-    "qwen3-vl":          "qwen.qwen3-vl-235b-a22b",
+    "qwen3-coder":           "qwen.qwen3-coder-30b-a3b-v1:0",
+    "qwen3-coder-next":      "qwen.qwen3-coder-next",
+    "qwen3-80b":             "qwen.qwen3-next-80b-a3b",
+    "qwen3-vl":              "qwen.qwen3-vl-235b-a22b",
+    # Qwen full-id aliases Claude Code may send
+    "qwen.qwen3-coder":      "qwen.qwen3-coder-30b-a3b-v1:0",
+    "qwen.qwen3-32b":        "qwen.qwen3-32b-v1:0",
+    "qwen.qwen3-80b":        "qwen.qwen3-next-80b-a3b",
+    "qwen.qwen3-vl":         "qwen.qwen3-vl-235b-a22b",
     # Anthropic Claude (200K context)
     "claude-haiku-4-5":       "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "claude-sonnet-4-5":      "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
@@ -87,6 +94,7 @@ MODEL_MAP = {
 TOOLS_SUPPORTED = {
     # Qwen3
     "qwen3-32b", "qwen3-coder", "qwen3-coder-next", "qwen3-80b", "qwen3-vl",
+    "qwen.qwen3-coder", "qwen.qwen3-32b", "qwen.qwen3-80b", "qwen.qwen3-vl",
     # Claude (all versions)
     "claude-haiku-4-5", "claude-sonnet-4-5", "claude-sonnet-4-6",
     "claude-opus-4-5", "claude-opus-4-6", "claude-opus-4", "claude-sonnet-4",
@@ -109,11 +117,20 @@ TOOLS_SUPPORTED = {
     # "kimi-k2", "kimi-k2-thinking",
 }
 
-# Hard cap on output tokens for small-context models (32K window)
+# Hard cap on output tokens per model
 MODEL_MAX_TOKENS = {
+    # Qwen3 (32K context window)
     "qwen3-32b":        4000,
     "qwen3-coder":      4000,
     "qwen3-coder-next": 4000,
+    "qwen.qwen3-coder": 4000,
+    "qwen.qwen3-32b":   4000,
+    # Amazon Nova (10K output limit)
+    "nova-pro":     9000,
+    "nova-lite":    9000,
+    "nova-2-lite":  9000,
+    "nova-micro":   9000,
+    "nova-premier": 9000,
 }
 
 # Max system prompt characters for small-context models
