@@ -1,0 +1,89 @@
+model_list:
+  # DeepSeek
+  - model_name: deepseek-r1
+    litellm_params:
+      model: bedrock/us.deepseek.r1-v1:0
+      aws_region_name: us-east-1
+
+  - model_name: deepseek-v3
+    litellm_params:
+      model: bedrock/deepseek.v3.2
+      aws_region_name: us-east-1
+
+  # Qwen 3
+  - model_name: qwen3-32b
+    litellm_params:
+      model: bedrock/qwen.qwen3-32b-v1:0
+      aws_region_name: us-east-1
+
+  - model_name: qwen3-coder
+    litellm_params:
+      model: bedrock/qwen.qwen3-coder-30b-a3b-v1:0
+      aws_region_name: us-east-1
+
+  # Amazon Nova
+  - model_name: nova-premier
+    litellm_params:
+      model: bedrock/us.amazon.nova-premier-v1:0
+      aws_region_name: us-east-1
+
+  - model_name: nova-pro
+    litellm_params:
+      model: bedrock/us.amazon.nova-pro-v1:0
+      aws_region_name: us-east-1
+
+  - model_name: nova-lite
+    litellm_params:
+      model: bedrock/us.amazon.nova-lite-v1:0
+      aws_region_name: us-east-1
+
+  - model_name: nova-micro
+    litellm_params:
+      model: bedrock/us.amazon.nova-micro-v1:0
+      aws_region_name: us-east-1
+
+  # Anthropic Claude (via Bedrock)
+  - model_name: claude-sonnet-4
+    litellm_params:
+      model: bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0
+      aws_region_name: us-east-1
+
+  - model_name: claude-opus-4
+    litellm_params:
+      model: bedrock/us.anthropic.claude-opus-4-20250514-v1:0
+      aws_region_name: us-east-1
+
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0
+      aws_region_name: us-east-1
+
+  # Mistral
+  - model_name: mistral-large-3
+    litellm_params:
+      model: bedrock/mistral.mistral-large-3-675b-instruct
+      aws_region_name: us-east-1
+
+  - model_name: magistral-small
+    litellm_params:
+      model: bedrock/mistral.magistral-small-2509
+      aws_region_name: us-east-1
+
+  # MiniMax
+  - model_name: minimax-m2
+    litellm_params:
+      model: bedrock/minimax.minimax-m2
+      aws_region_name: us-east-1
+
+  # Kimi
+  - model_name: kimi-k2
+    litellm_params:
+      model: bedrock/moonshotai.kimi-k2.5
+      aws_region_name: us-east-1
+
+litellm_settings:
+  drop_params: true        # ignore unsupported params per model
+  request_timeout: 600
+
+general_settings:
+  master_key: "sk-litellm"   # change this in production

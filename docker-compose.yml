@@ -1,0 +1,31 @@
+services:
+
+  # Anthropic Messages API -> AWS Bedrock
+  # Use with Claude Code: ANTHROPIC_BASE_URL=http://localhost:4002
+  bedrock-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.bedrock-proxy
+    ports:
+      - "4002:4002"
+    environment:
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
+    restart: unless-stopped
+
+  # OpenAI-compatible API -> AWS Bedrock
+  # Use with OpenAI-compatible tools: base_url=http://localhost:4000
+  litellm:
+    build:
+      context: .
+      dockerfile: Dockerfile.litellm
+    ports:
+      - "4000:4000"
+    environment:
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
+    restart: unless-stopped

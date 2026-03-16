@@ -1,13 +1,22 @@
 # ai-gateway
 
-A local proxy that accepts [Anthropic Messages API](https://docs.anthropic.com/en/api/messages) requests and forwards them to AWS Bedrock via the Converse API. Lets you use tools like Claude Code with non-Anthropic models hosted on Bedrock.
+Two independent Bedrock gateway services:
 
-## How it works
+| Service | Port | API format | Use with |
+|---|---|---|---|
+| `bedrock-proxy` | `4002` | Anthropic Messages API | Claude Code |
+| `litellm` | `4000` | OpenAI-compatible API | Cursor, Continue, etc. |
 
-1. Receives requests in Anthropic Messages API format on `POST /v1/messages`
-2. Translates them to Bedrock Converse API format
+Both call AWS Bedrock directly — they do not route through each other.
+
+## bedrock-proxy
+
+Accepts [Anthropic Messages API](https://docs.anthropic.com/en/api/messages) requests, translates them to Bedrock Converse API format, and returns Anthropic-format responses.
+
+1. Receives requests on `POST /v1/messages`
+2. Translates to Bedrock Converse API format
 3. Calls the model via `boto3`
-4. Returns the response in Anthropic Messages API format
+4. Returns Anthropic-format response
 
 ## Supported models
 
@@ -22,23 +31,41 @@ A local proxy that accepts [Anthropic Messages API](https://docs.anthropic.com/e
 | `kimi-k2` | Kimi K2 |
 | `mistral-large-3`, `magistral-small`, `devstral-2`, `pixtral-large` | Mistral |
 
+## litellm
+
+OpenAI-compatible gateway backed by LiteLLM, calling Bedrock directly. Use this with any tool that speaks the OpenAI API (Cursor, Continue, Open WebUI, etc.).
+
+Config: `litellm_config.yaml`
+
+---
+
 ## Requirements
 
-- Python 3.10+
-- AWS credentials configured (e.g. via `~/.aws/credentials` or environment variables)
-- Bedrock model access enabled in your AWS account
+- Docker
+- AWS credentials with Bedrock model access
+
+## Running with Docker Compose
+
+```bash
+# create a .env file with your AWS credentials
+cp .env.example .env
+
+docker compose up -d
+```
+
+Or run a single service:
+
+```bash
+docker compose up -d bedrock-proxy   # port 4002
+docker compose up -d litellm         # port 4000
+```
+
+## Running bedrock-proxy without Docker
 
 ```bash
 pip install fastapi uvicorn boto3
-```
-
-## Usage
-
-```bash
 python bedrock_proxy.py
 ```
-
-The proxy starts on port `4002` by default.
 
 ### Environment variables
 
@@ -47,7 +74,7 @@ The proxy starts on port `4002` by default.
 | `PROXY_PORT` | `4002` | Port to listen on |
 | `AWS_REGION` | `us-east-1` | AWS region for Bedrock |
 
-### Using with Claude Code
+## Using with Claude Code
 
 ```bash
 export CLAUDE_CODE_USE_BEDROCK=""
@@ -59,7 +86,14 @@ export ANTHROPIC_SMALL_FAST_MODEL=deepseek-r1
 
 Then run `claude` as normal.
 
-## Endpoints
+## Using litellm with OpenAI-compatible tools
+
+```
+base_url: http://localhost:4000
+api_key: sk-litellm
+```
+
+## bedrock-proxy endpoints
 
 - `POST /v1/messages` — main inference endpoint
 - `GET /v1/models` — list available model aliases
