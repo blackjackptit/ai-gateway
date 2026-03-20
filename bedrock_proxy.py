@@ -16,16 +16,19 @@ Then set:
   ANTHROPIC_SMALL_FAST_MODEL=deepseek-r1
 """
 
+import asyncio
 import json
 import uuid
-import time
 import os
 import boto3
+from botocore.config import Config
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
+from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI()
+_executor = ThreadPoolExecutor()
 
 # Model ID mapping
 MODEL_MAP = {
@@ -80,6 +83,10 @@ MODEL_MAP = {
     # MiniMax
     "minimax-m2":   "minimax.minimax-m2",    # 1M context
     "minimax-m2.1": "minimax.minimax-m2.1",  # 1M context
+    "minimax-m2.5": "minimax.minimax-m2.5",  # 1M context
+    # GLM (Zhipu AI)
+    "glm-5":        "zhipuai.glm-5",         # 128K context
+    "glm-5-plus":   "zhipuai.glm-5-plus",    # 128K context
     # Kimi
     "kimi-k2":         "moonshotai.kimi-k2.5",       # 128K context
     "kimi-k2-thinking": "moonshot.kimi-k2-thinking", # 128K context
@@ -110,44 +117,130 @@ TOOLS_SUPPORTED = {
     # Meta Llama 4 — geo-restricted
     # "llama4-scout", "llama4-maverick",
     # MiniMax
-    "minimax-m2", "minimax-m2.1",
+    "minimax-m2", "minimax-m2.1", "minimax-m2.5",
+    # GLM (Zhipu AI)
+    "glm-5", "glm-5-plus",
     # Mistral
     "mistral-large-3", "magistral-small", "devstral-2", "pixtral-large",
     # Kimi — outputs raw text markup, NOT added here (not supported)
     # "kimi-k2", "kimi-k2-thinking",
 }
 
-# Hard cap on output tokens per model
-MODEL_MAX_TOKENS = {
-    # Qwen3 (32K context window)
-    "qwen3-32b":        4000,
-    "qwen3-coder":      4000,
-    "qwen3-coder-next": 4000,
-    "qwen.qwen3-coder": 4000,
-    "qwen.qwen3-32b":   4000,
-    # Amazon Nova (10K output limit)
-    "nova-pro":     9000,
-    "nova-lite":    9000,
-    "nova-2-lite":  9000,
-    "nova-micro":   9000,
-    "nova-premier": 9000,
+# Models requiring strict tool-block separation (no mixing text + toolUse/toolResult in same turn)
+# Claude and Nova models support mixed content; third-party models typically do not.
+STRICT_TOOL_SEPARATION = {
+    "qwen3-32b", "qwen3-coder", "qwen3-coder-next", "qwen3-80b", "qwen3-vl",
+    "qwen.qwen3-coder", "qwen.qwen3-32b", "qwen.qwen3-80b", "qwen.qwen3-vl",
+    "minimax-m2", "minimax-m2.1", "minimax-m2.5",
+    "glm-5", "glm-5-plus",
+    "mistral-large-3", "magistral-small", "devstral-2", "pixtral-large",
 }
 
-# Max system prompt characters for small-context models
+# Hard cap on output tokens per model
+MODEL_MAX_TOKENS = {
+    # Qwen3 (32K context window, Bedrock max output 8192)
+    "qwen3-32b":        8192,
+    "qwen3-coder":      8192,
+    "qwen3-coder-next": 8192,
+    "qwen3-80b":        8192,
+    "qwen3-vl":         8192,
+    "qwen.qwen3-coder": 8192,
+    "qwen.qwen3-32b":   8192,
+    "qwen.qwen3-80b":   8192,
+    "qwen.qwen3-vl":    8192,
+    # Amazon Nova output limits per Bedrock docs
+    "nova-pro":     5120,
+    "nova-lite":    5120,
+    "nova-2-lite":  5120,
+    "nova-micro":   5120,
+    "nova-premier": 10240,
+    # MiniMax models (1M context, cap output to prevent timeouts)
+    "minimax-m2":   8192,
+    "minimax-m2.1": 8192,
+    "minimax-m2.5": 8192,
+    # GLM models (128K context, conservative limit)
+    "glm-5":        8192,
+    "glm-5-plus":   8192,
+}
+
+# Max system prompt characters — leave headroom for messages within the context window
 MODEL_MAX_SYSTEM_CHARS = {
-    "qwen3-32b":        8000,
-    "qwen3-coder":      8000,
-    "qwen3-coder-next": 8000,
+    # Qwen3 32K context: ~24K chars (~6K tokens) for system, rest for messages
+    "qwen3-32b":        24000,
+    "qwen3-coder":      24000,
+    "qwen3-coder-next": 24000,
+    "qwen.qwen3-32b":   24000,
+    "qwen.qwen3-coder": 24000,
+}
+
+# Model-specific read timeouts (in seconds) for slower/large-context models
+MODEL_READ_TIMEOUTS = {
+    # MiniMax 1M context models may take longer
+    "minimax-m2":       420,  # 7 minutes
+    "minimax-m2.1":     420,  # 7 minutes
+    "minimax-m2.5":     420,  # 7 minutes
+    # DeepSeek reasoning models
+    "deepseek-r1":      360,  # 6 minutes
+    # GLM models (may be slower with tool calls)
+    "glm-5":            360,  # 6 minutes
+    "glm-5-plus":       360,  # 6 minutes
+    # Kimi reasoning models
+    "kimi-k2-thinking": 360,  # 6 minutes
+    # Default for other models is 300s (5 minutes) set in get_bedrock_client
 }
 
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
+_bedrock_client: boto3.client = None
+_model_specific_clients: dict = {}
 
-def get_bedrock_client():
-    return boto3.client("bedrock-runtime", region_name=AWS_REGION)
+def get_bedrock_client(model_alias: str = None):
+    """Get a Bedrock client with appropriate timeout for the model."""
+    # If no specific model requested, return default client
+    if model_alias is None:
+        global _bedrock_client
+        if _bedrock_client is None:
+            config = Config(
+                read_timeout=300,      # 5 minutes default
+                connect_timeout=10,    # 10 seconds to establish connection
+                retries={
+                    'max_attempts': 3,
+                    'mode': 'adaptive'  # Exponential backoff with jitter
+                }
+            )
+            _bedrock_client = boto3.client(
+                "bedrock-runtime",
+                region_name=AWS_REGION,
+                config=config
+            )
+        return _bedrock_client
+
+    # Check if model needs custom timeout
+    custom_timeout = MODEL_READ_TIMEOUTS.get(model_alias)
+    if custom_timeout is None:
+        # Use default client for models without special timeout needs
+        return get_bedrock_client(None)
+
+    # Create or retrieve model-specific client
+    if model_alias not in _model_specific_clients:
+        config = Config(
+            read_timeout=custom_timeout,
+            connect_timeout=10,
+            retries={
+                'max_attempts': 3,
+                'mode': 'adaptive'
+            }
+        )
+        _model_specific_clients[model_alias] = boto3.client(
+            "bedrock-runtime",
+            region_name=AWS_REGION,
+            config=config
+        )
+
+    return _model_specific_clients[model_alias]
 
 
-DEFAULT_MODEL = "deepseek-r1"
+DEFAULT_MODEL = "claude-haiku-4-5"
 
 def anthropic_to_converse(body: dict) -> tuple[str, dict]:
     """Convert Anthropic Messages API body to Bedrock Converse API format."""
@@ -222,6 +315,16 @@ def anthropic_to_converse(body: dict) -> tuple[str, dict]:
                             })
             if not converse_content:
                 converse_content = [{"text": "[empty]"}]
+
+        # Bedrock forbids mixing text blocks with toolUse/toolResult in the same turn
+        # for models that require strict separation (non-Claude, non-Nova).
+        if model_alias in STRICT_TOOL_SEPARATION:
+            has_tool_blocks = any("toolUse" in b or "toolResult" in b for b in converse_content)
+            if has_tool_blocks:
+                converse_content = [b for b in converse_content if "toolUse" in b or "toolResult" in b]
+                if not converse_content:
+                    converse_content = [{"text": "[empty]"}]
+
         messages.append({"role": role, "content": converse_content})
 
     converse_body = {"messages": messages}
@@ -317,6 +420,104 @@ def converse_to_anthropic(model_alias: str, converse_resp: dict) -> dict:
     }
 
 
+def _sse(event_type: str, data: dict) -> str:
+    return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+
+def _stream_bedrock_sse(client, bedrock_model_id: str, converse_body: dict, model_alias: str):
+    """Blocking generator that calls converse_stream and yields SSE strings."""
+    resp = client.converse_stream(modelId=bedrock_model_id, **converse_body)
+    stream = resp.get("stream", [])
+
+    msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+    yield _sse("message_start", {
+        "type": "message_start",
+        "message": {
+            "id": msg_id, "type": "message", "role": "assistant",
+            "model": model_alias, "content": [], "stop_reason": None,
+            "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0},
+        },
+    })
+    yield _sse("ping", {"type": "ping"})
+
+    block_index = 0
+    stop_reason = "end_turn"
+    output_tokens = 0
+
+    for event in stream:
+        if "messageStart" in event:
+            pass  # already sent
+
+        elif "contentBlockStart" in event:
+            start = event["contentBlockStart"].get("start", {})
+            if "toolUse" in start:
+                tu = start["toolUse"]
+                cb = {"type": "tool_use", "id": tu["toolUseId"], "name": tu["name"], "input": {}}
+            else:
+                cb = {"type": "text", "text": ""}
+            yield _sse("content_block_start", {"type": "content_block_start", "index": block_index, "content_block": cb})
+
+        elif "contentBlockDelta" in event:
+            delta = event["contentBlockDelta"].get("delta", {})
+            if "text" in delta:
+                yield _sse("content_block_delta", {
+                    "type": "content_block_delta", "index": block_index,
+                    "delta": {"type": "text_delta", "text": delta["text"]},
+                })
+            elif "toolUse" in delta:
+                yield _sse("content_block_delta", {
+                    "type": "content_block_delta", "index": block_index,
+                    "delta": {"type": "input_json_delta", "partial_json": delta["toolUse"].get("input", "")},
+                })
+
+        elif "contentBlockStop" in event:
+            yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
+            block_index += 1
+
+        elif "messageStop" in event:
+            br = event["messageStop"].get("stopReason", "end_turn")
+            stop_reason = {"end_turn": "end_turn", "stop_sequence": "stop_sequence",
+                           "max_tokens": "max_tokens", "tool_use": "tool_use"}.get(br, "end_turn")
+
+        elif "metadata" in event:
+            output_tokens = event["metadata"].get("usage", {}).get("outputTokens", 0)
+
+    yield _sse("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+        "usage": {"output_tokens": output_tokens},
+    })
+    yield _sse("message_stop", {"type": "message_stop"})
+
+
+async def _sse_generator(client, bedrock_model_id: str, converse_body: dict, model_alias: str):
+    """Async wrapper: runs the blocking SSE generator in a thread and yields chunks."""
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def run():
+        try:
+            for chunk in _stream_bedrock_sse(client, bedrock_model_id, converse_body, model_alias):
+                loop.call_soon_threadsafe(queue.put_nowait, chunk)
+        except Exception as e:
+            err_msg = str(e)
+            timeout_info = f" (timeout: {MODEL_READ_TIMEOUTS.get(model_alias, 300)}s)" if "timeout" in err_msg.lower() or "read timeout" in err_msg.lower() else ""
+            print(f"bedrock proxy [ERROR] Stream failed: {err_msg}{timeout_info}")
+            print(f"bedrock proxy [ERROR] Model: {model_alias} -> {bedrock_model_id}")
+            err = _sse("error", {"type": "error", "error": {"type": "api_error", "message": err_msg}})
+            loop.call_soon_threadsafe(queue.put_nowait, err)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    _executor.submit(run)
+
+    while True:
+        chunk = await queue.get()
+        if chunk is None:
+            break
+        yield chunk
+
+
 @app.post("/v1/messages")
 async def messages(request: Request):
     try:
@@ -324,19 +525,33 @@ async def messages(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    model_alias = body.get("model", "deepseek-r1")
+    model_alias = body.get("model", DEFAULT_MODEL)
+    stream = body.get("stream", False)
 
     try:
         bedrock_model_id, converse_body = anthropic_to_converse(body)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Request conversion error: {e}")
 
+    # Get client with model-specific timeout if needed
+    client = get_bedrock_client(model_alias)
+
+    if stream:
+        return StreamingResponse(
+            _sse_generator(client, bedrock_model_id, converse_body, model_alias),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     try:
-        client = get_bedrock_client()
-        resp = client.converse(modelId=bedrock_model_id, **converse_body)
+        resp = await asyncio.get_event_loop().run_in_executor(
+            _executor, lambda: client.converse(modelId=bedrock_model_id, **converse_body)
+        )
     except Exception as e:
         err_msg = str(e)
-        print(f"[ERROR] Bedrock call failed: {err_msg}")
+        timeout_info = f" (timeout: {MODEL_READ_TIMEOUTS.get(model_alias, 300)}s)" if "timeout" in err_msg.lower() or "read timeout" in err_msg.lower() else ""
+        print(f"bedrock proxy [ERROR] Bedrock call failed: {err_msg}{timeout_info}")
+        print(f"bedrock proxy [ERROR] Model: {model_alias} -> {bedrock_model_id}")
         return JSONResponse(
             status_code=500,
             content={"error": {"type": "api_error", "message": err_msg}},
@@ -344,6 +559,35 @@ async def messages(request: Request):
 
     anthropic_resp = converse_to_anthropic(model_alias, resp)
     return JSONResponse(content=anthropic_resp)
+
+
+@app.post("/v1/messages/count_tokens")
+async def count_tokens(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    # Rough token estimation: ~4 chars per token
+    total_chars = 0
+    for msg in body.get("messages", []):
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    total_chars += len(str(block.get("text", "") or block.get("input", "")))
+    system = body.get("system", "")
+    if isinstance(system, str):
+        total_chars += len(system)
+    elif isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict):
+                total_chars += len(block.get("text", ""))
+
+    input_tokens = max(1, total_chars // 4)
+    return JSONResponse(content={"input_tokens": input_tokens})
 
 
 @app.get("/health")
@@ -367,4 +611,8 @@ if __name__ == "__main__":
     print(f"Starting Bedrock DeepSeek proxy on port {port}")
     print(f"AWS Region: {AWS_REGION}")
     print(f"Models: {list(MODEL_MAP.keys())}")
+    print(f"Default timeout: 300s (5 minutes)")
+    if MODEL_READ_TIMEOUTS:
+        print(f"Custom timeouts configured for: {list(MODEL_READ_TIMEOUTS.keys())}")
+    print(f"Retry policy: 3 attempts with adaptive exponential backoff")
     uvicorn.run(app, host="0.0.0.0", port=port)
